@@ -18,7 +18,7 @@ A **single-node OpenShift cluster** deployed as an appliance with:
 - ✅ **Full OpenShift functionality** on one machine
 - ✅ **Configuration as code** - everything defined in YAML
 - ✅ **Repeatable deployments** - same result every time
-- ✅ **Operator pre-installation** - your operators baked into the appliance
+- ✅ **Operator availability** - your operators included in repository for installation
 - ✅ **Disconnected operation** - works without internet access
 - ✅ **Custom image pre-loading** - container images embedded in appliance
 
@@ -51,6 +51,7 @@ Create your appliance configuration as code:
 
 ```yaml
 # artifacts/appliance-config.yaml
+# NOTE: This is an example configuration - customize for your environment
 apiVersion: v1beta1
 kind: ApplianceConfig
 ocpRelease:
@@ -63,7 +64,7 @@ sshKey: ssh-rsa AAAAB3NzaC1yc2E... your-key-here
 enableDefaultSources: false
 stopLocalRegistry: false
 
-# Pre-install operators (configuration as code)
+# Pre-include operators (makes them available for installation)
 operators:
   - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.19
     packages:
@@ -79,6 +80,8 @@ additionalImages:
   - name: registry.redhat.io/ubi9/ubi:latest
   - name: registry.redhat.io/rhel9/support-tools
 ```
+
+> **⚠️ Important**: The configuration above is an example. You must customize it with your actual pull secret, SSH key, password, and desired operators before building your appliance.
 
 ### 2. Set Up Build Environment
 ```bash

@@ -25,23 +25,39 @@ A **single-node OpenShift cluster** deployed as an appliance with:
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                Single Node OpenShift                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
-│  │   Control   │  │   Worker    │  │  Operators  │    │
-│  │    Plane    │  │  Workloads  │  │ (Pre-built) │    │
-│  └─────────────┘  └─────────────┘  └─────────────┘    │
-└─────────────────────────────────────────────────────────┘
-                         │
-              ┌─────────────────────┐
-              │  Appliance Image    │
-              │  (ISO or Raw Disk)  │
-              └─────────────────────┘
-                         │
-              ┌─────────────────────┐
-              │ Configuration Code  │
-              │ (YAML Definitions)  │
-              └─────────────────────┘
+┌─────────────────────────────────────────┐
+│           Configuration Code            │
+│                                         │
+│  appliance-config.yaml                  │
+│  install-config.yaml                    │
+│  agent-config.yaml                      │
+└─────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│            Build Process                │
+│                                         │
+│  Build Host + Appliance Builder        │
+│  → Creates bootable ISO                 │
+└─────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│           Appliance ISO                 │
+│                                         │
+│  CoreOS + OpenShift + Operators        │
+│  + Container Images + Your Config       │
+└─────────────────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────┐
+│        Single Node OpenShift           │
+│                                         │
+│  Control Plane + Worker + Storage      │
+│  Running on one machine                 │
+└─────────────────────────────────────────┘
+
+Configuration → Build → ISO → Deploy
 ```
 
 ## Quick Start
@@ -92,6 +108,10 @@ sudo ansible-playbook -K prep-appliance-workspace.yml
 ### 3. Build Your Appliance
 ```bash
 # Build the single-node appliance ISO
+sudo podman run --rm -it --pull newer --privileged --net=host \
+  -v $APPLIANCE_ASSETS:/assets:Z $APPLIANCE_IMAGE build live-iso
+
+# Or using explicit paths (if environment variables not set)
 sudo podman run --rm -it --pull newer --privileged --net=host \
   -v /mnt/appliance_assets:/assets:Z \
   quay.io/edge-infrastructure/openshift-appliance build live-iso

@@ -1,0 +1,356 @@
+#
+# OpenShift Appliance Workspace Preparation Playbook
+#
+# This playbook prepares a clean workspace for OpenShift Appliance Builder operations.
+# It handles configuration files, backup processing, and cache management.
+#
+# Usage:
+#   ansible-playbook -K prep-appliance-workspace.yml
+#
+# With custom variables:
+#   ansible-playbook -K prep-appliance-workspace.yml \
+#     -e appliance_assets=/custom/path \
+#     -e container_runtime=docker
+#
+# Requirements:
+#   - Ansible 2.9+
+#   - Podman or Docker installed
+#   - Sudo access
+#   - appliance-config.yaml in artifacts/ directory (recommended)
+#   - OpenShift config .bak files (optional)
+#
+# Author: OpenShift Appliance Workspace Team
+# Version: 1.0
+# Repository: https://github.com/yourusername/openshift-appliance-workspace
+#
+
+---
+- name: OpenShift Appliance Workspace Preparation
+  hosts: localhost
+  become: true
+  gather_facts: false
+
+  vars:
+    # Primary configuration - can be overridden via -e
+    appliance_assets: "{{ override_appliance_assets | default('/mnt/appliance_assets') }}"
+    appliance_image: "{{ override_appliance_image | default('quay.io/edge-infrastructure/openshift-appliance') }}"
+    container_runtime: "{{ override_container_runtime | default('podman') }}"
+    
+    # Derived paths
+    artifacts_dir: "{{ appliance_assets }}/artifacts"
+    
+    # User detection with fallback
+    run_user: "{{ lookup('env','SUDO_USER') | default(lookup('env','USER'), true) | default('root', true) }}"
+    
+    # Directory structure to create
+    workspace_dirs:
+      - cluster_config
+      - logs
+      - tmp
+      - backups
+    
+    # Config files to search for
+    backup_patterns:
+      - "install-config.yaml.bak"
+      - "agent-config.yaml.bak"
+
+  pre_tasks:
+    - name: Validate environment
+      block:
+        - name: Safety checks
+          ansible.builtin.assert:
+            that:
+              - appliance_assets != '/'
+              - appliance_assets | length > 1
+              - run_user | length > 0
+              - container_runtime in ['podman', 'docker']
+            fail_msg: |
+              Safety validation failed. Please check:
+              - APPLIANCE_ASSETS path is not root (/) and is valid
+              - Container runtime is 'podman' or 'docker'
+              - User detection worked properly
+
+        - name: Check container runtime availability
+          ansible.builtin.command: "which {{ container_runtime }}"
+          register: runtime_check
+          failed_when: runtime_check.rc != 0
+          changed_when: false
+
+        - name: Verify sudo user context
+          ansible.builtin.fail:
+            msg: |
+              Please run with sudo and ensure SUDO_USER is set:
+              sudo ansible-playbook -K {{ ansible_playbook_name }}
+          when: 
+            - ansible_user_uid == 0
+            - run_user == "root"
+            - lookup('env', 'SUDO_USER') | length == 0
+
+        - name: Get user primary group
+          become: false
+          ansible.builtin.command: "id -gn {{ run_user }}"
+          register: run_group_cmd
+          changed_when: false
+
+        - name: Set run_group fact
+          ansible.builtin.set_fact:
+            run_group: "{{ run_group_cmd.stdout | trim }}"
+
+        - name: Display configuration
+          ansible.builtin.debug:
+            msg:
+              - "OpenShift Appliance Workspace Preparation"
+              - ""
+              - "Configuration:"
+              - "  Workspace: {{ appliance_assets }}"
+              - "  Container Runtime: {{ container_runtime }}"
+              - "  Appliance Image: {{ appliance_image }}"
+              - "  User: {{ run_user }}:{{ run_group }}"
+              - "  Artifacts: {{ artifacts_dir }}"
+
+      rescue:
+        - name: Environment validation failed
+          ansible.builtin.fail:
+            msg: |
+              Environment validation failed. Please ensure:
+              1. {{ container_runtime }} is installed and available
+              2. You're running with sudo: sudo ansible-playbook -K {{ ansible_playbook_name }}
+              3. Workspace path is valid: {{ appliance_assets }}
+              
+              Error: {{ ansible_failed_result.msg | default('Unknown validation error') }}
+
+  tasks:
+    - name: Workspace setup
+      block:
+        - name: Ensure parent directory exists
+          ansible.builtin.file:
+            path: "{{ appliance_assets | dirname }}"
+            state: directory
+            mode: "0755"
+
+        - name: Create main workspace directory
+          ansible.builtin.file:
+            path: "{{ appliance_assets }}"
+            state: directory
+            owner: "{{ run_user }}"
+            group: "{{ run_group }}"
+            mode: "0755"
+
+        - name: Ensure artifacts directory exists (always preserved)
+          ansible.builtin.file:
+            path: "{{ artifacts_dir }}"
+            state: directory
+            owner: "{{ run_user }}"
+            group: "{{ run_group }}"
+            mode: "0755"
+
+    - name: Clean workspace (preserve artifacts)
+      block:
+        - name: Find existing files to clean
+          ansible.builtin.find:
+            paths: "{{ appliance_assets }}"
+            recurse: false
+            file_type: any
+            excludes: ["artifacts"]
+          register: cleanup_files
+
+        - name: Remove existing workspace files
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: absent
+          loop: "{{ cleanup_files.files }}"
+          loop_control:
+            label: "{{ item.path | basename }}"
+          when: cleanup_files.matched > 0
+
+        - name: Create workspace directory structure
+          ansible.builtin.file:
+            path: "{{ appliance_assets }}/{{ item }}"
+            state: directory
+            owner: "{{ run_user }}"
+            group: "{{ run_group }}"
+            mode: "0755"
+          loop: "{{ workspace_dirs }}"
+
+    - name: Configuration management
+      block:
+        - name: Check for appliance-config.yaml in artifacts
+          ansible.builtin.stat:
+            path: "{{ artifacts_dir }}/appliance-config.yaml"
+          register: appliance_config_check
+
+        - name: Copy appliance-config.yaml to workspace root
+          ansible.builtin.copy:
+            src: "{{ artifacts_dir }}/appliance-config.yaml"
+            dest: "{{ appliance_assets }}/appliance-config.yaml"
+            owner: "{{ run_user }}"
+            group: "{{ run_group }}"
+            mode: "0644"
+            remote_src: true
+          when: appliance_config_check.stat.exists
+
+        - name: Note if appliance-config.yaml is missing
+          ansible.builtin.debug:
+            msg: |
+              No appliance-config.yaml found in {{ artifacts_dir }}/
+              You'll need to create one before building your appliance.
+          when: not appliance_config_check.stat.exists
+
+    - name: OpenShift configuration backup processing
+      block:
+        - name: Search for OpenShift config backup files
+          ansible.builtin.find:
+            paths: 
+              - "{{ appliance_assets }}"
+              - "{{ artifacts_dir }}"
+            patterns: "{{ backup_patterns }}"
+            recurse: false
+          register: openshift_backup_files
+
+        - name: Process backup files if found
+          when: openshift_backup_files.matched > 0
+          block:
+            - name: Copy backup files to cluster_config (preserve .bak extension)
+              ansible.builtin.copy:
+                src: "{{ item.path }}"
+                dest: "{{ appliance_assets }}/cluster_config/{{ item.path | basename }}"
+                owner: "{{ run_user }}"
+                group: "{{ run_group }}"
+                mode: "0644"
+                remote_src: true
+              loop: "{{ openshift_backup_files.files }}"
+              loop_control:
+                label: "{{ item.path | basename }}"
+
+            - name: Create working copies (remove .bak extension)
+              ansible.builtin.copy:
+                src: "{{ appliance_assets }}/cluster_config/{{ item.path | basename }}"
+                dest: "{{ appliance_assets }}/cluster_config/{{ item.path | basename | regex_replace('\\.bak$', '') }}"
+                owner: "{{ run_user }}"
+                group: "{{ run_group }}"
+                mode: "0644"
+                remote_src: true
+              loop: "{{ openshift_backup_files.files }}"
+              loop_control:
+                label: "{{ item.path | basename | regex_replace('\\.bak$', '') }}"
+
+            - name: Clean up original backup files from workspace root
+              ansible.builtin.file:
+                path: "{{ item.path }}"
+                state: absent
+              loop: "{{ openshift_backup_files.files }}"
+              loop_control:
+                label: "{{ item.path }}"
+              when: item.path.startswith(appliance_assets) and not item.path.startswith(artifacts_dir)
+
+        - name: Report backup processing results
+          ansible.builtin.debug:
+            msg: |
+              {% if openshift_backup_files.matched > 0 %}
+              Processed {{ openshift_backup_files.matched }} OpenShift config backup file(s):
+              {% for item in openshift_backup_files.files %}
+              - {{ item.path | basename }}
+              {% endfor %}
+              {% else %}
+              No OpenShift config backup files found
+              {% endif %}
+
+    - name: Container cache management
+      block:
+        - name: Clean appliance builder cache
+          ansible.builtin.command:
+            argv:
+              - "{{ container_runtime }}"
+              - run
+              - --rm
+              - --pull
+              - newer
+              - -v
+              - "{{ appliance_assets }}:/assets:Z"
+              - "{{ appliance_image }}"
+              - clean
+              - --cache
+          register: cache_clean_result
+          failed_when: cache_clean_result.rc != 0
+          changed_when: "'cleaned' in cache_clean_result.stdout.lower() or cache_clean_result.rc == 0"
+
+      rescue:
+        - name: Cache cleanup failed - continue anyway
+          ansible.builtin.debug:
+            msg: |
+              Cache cleanup failed but continuing with workspace preparation.
+              You may want to clean the cache manually later:
+              {{ container_runtime }} run --rm -v {{ appliance_assets }}:/assets:Z {{ appliance_image }} clean --cache
+              
+              Error: {{ ansible_failed_result.msg | default('Unknown cache error') }}
+
+    - name: Finalize workspace
+      block:
+        - name: Set final ownership
+          ansible.builtin.file:
+            path: "{{ appliance_assets }}"
+            owner: "{{ run_user }}"
+            group: "{{ run_group }}"
+            recurse: yes
+
+        - name: Create workspace info file
+          ansible.builtin.copy:
+            dest: "{{ appliance_assets }}/WORKSPACE_INFO.txt"
+            owner: "{{ run_user }}"
+            group: "{{ run_group }}"
+            mode: "0644"
+            content: |
+              OpenShift Appliance Workspace
+              =============================
+              
+              Created: {{ ansible_date_time.iso8601 }}
+              User: {{ run_user }}:{{ run_group }}
+              Container Runtime: {{ container_runtime }}
+              Appliance Image: {{ appliance_image }}
+              
+              Directory Structure:
+              {{ appliance_assets }}/
+              ├── artifacts/              # Your input files (preserved)
+              ├── appliance-config.yaml   # Main appliance configuration
+              ├── cluster_config/         # OpenShift install/agent configs
+              ├── logs/                   # Build logs and history
+              ├── tmp/                    # Temporary files
+              ├── backups/                # Configuration backups
+              └── WORKSPACE_INFO.txt      # This file
+              
+              Next Steps:
+              1. Verify/edit appliance-config.yaml
+              2. Run appliance build:
+                 sudo {{ container_runtime }} run --rm -it --pull newer --privileged --net=host \
+                   -v {{ appliance_assets }}:/assets:Z {{ appliance_image }} build live-iso
+              
+              Environment Variables (set for convenience):
+              export APPLIANCE_IMAGE="{{ appliance_image }}"
+              export APPLIANCE_ASSETS="{{ appliance_assets }}"
+              
+              For more information, visit:
+              https://github.com/openshift/appliance
+
+  post_tasks:
+    - name: Workspace preparation summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "OpenShift Appliance Workspace Preparation Complete!"
+          - ""
+          - "Workspace: {{ appliance_assets }}"
+          - "Directory structure created"
+          - "Appliance config: {{ 'Found and copied' if appliance_config_check.stat.exists else 'Not found - please create' }}"
+          - "OpenShift backups: {{ openshift_backup_files.matched | default(0) }} file(s) processed"
+          - "Cache cleaned: {{ cache_clean_result.changed | default(false) }}"
+          - "Ownership set: {{ run_user }}:{{ run_group }}"
+          - ""
+          - "Next steps:"
+          - "   1. Review: {{ appliance_assets }}/WORKSPACE_INFO.txt"
+          - "   2. Edit config: {{ appliance_assets }}/appliance-config.yaml"
+          - "   3. Build appliance using container command"
+          - ""
+          - "Manual build command:"
+          - "   sudo {{ container_runtime }} run --rm -it --pull newer --privileged --net=host \\"
+          - "     -v {{ appliance_assets }}:/assets:Z {{ appliance_image }} build live-iso"
+      changed_when: false
